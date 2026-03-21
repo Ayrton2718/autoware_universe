@@ -45,6 +45,10 @@ protected:
 
   static void SetUpTestSuite()
   {
+    if (!autoware::cuda_utils::is_cuda_runtime_available()) {
+      return;  // Per-test SetUp() from CudaTest will GTEST_SKIP each test
+    }
+
     const char * home_env = std::getenv("HOME");
     std::filesystem::path home_path = home_env ? home_env : "/";
     std::filesystem::path onnx_path =
