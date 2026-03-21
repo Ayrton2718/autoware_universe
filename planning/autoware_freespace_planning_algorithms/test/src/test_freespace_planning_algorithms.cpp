@@ -280,9 +280,9 @@ bool test_algorithm(enum AlgorithmType algo_type, bool dump_rosbag = false)
 {
   std::unique_ptr<fpa::AbstractPlanningAlgorithm> algo;
   if (algo_type == AlgorithmType::ASTAR_SINGLE) {
-    algo = configure_astar(true);
-  } else if (algo_type == AlgorithmType::ASTAR_MULTI) {
     algo = configure_astar(false);
+  } else if (algo_type == AlgorithmType::ASTAR_MULTI) {
+    algo = configure_astar(true);
   } else if (algo_type == AlgorithmType::RRTSTAR_FASTEST) {
     algo = configure_rrtstar(false, false);
   } else if (algo_type == AlgorithmType::RRTSTAR_UPDATE) {
