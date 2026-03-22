@@ -152,13 +152,20 @@ class TestFaultInjectionLink(unittest.TestCase):
             DiagnosticArray, self.output_diagnostics_topic, lambda msg: msg_buffer.append(msg), 10
         )
 
-        # Call spin_once() so that the publisher publish messages simultaneously
+        # Create publishers and wait for subscriber matching before publishing
         pub_events_1 = self.test_node.create_publisher(SimulationEvents, "/simulation/events", 10)
         pub_events_2 = self.test_node.create_publisher(SimulationEvents, "/simulation/events", 10)
         pub_diagnostics = self.test_node.create_publisher(
             DiagnosticArray, self.input_diagnostics_topic, 10
         )
-        rclpy.spin_once(self.test_node, timeout_sec=0.1)
+        end_time = time.time() + 5.0
+        while time.time() < end_time:
+            rclpy.spin_once(self.test_node, timeout_sec=0.1)
+            if (
+                pub_events_1.get_subscription_count() > 0
+                and pub_diagnostics.get_subscription_count() > 0
+            ):
+                break
         input_msg = DiagnosticArray()
         input_msg.status = [
             DiagnosticStatus(name=": CPU Load Average", level=DiagnosticStatus.OK, message="OK"),
@@ -183,10 +190,10 @@ class TestFaultInjectionLink(unittest.TestCase):
             )
         )
 
-        # Wait until the subscriber receive messages
-        end_time = time.time() + self.evaluation_time
+        # Wait until the subscriber receives messages
+        end_time = time.time() + 5.0
         while time.time() < end_time:
-            rclpy.spin_once(self.test_node, timeout_sec=1.0)
+            rclpy.spin_once(self.test_node, timeout_sec=0.1)
 
         # Verify the number of received messages
         self.assertGreater(len(msg_buffer), 0)
