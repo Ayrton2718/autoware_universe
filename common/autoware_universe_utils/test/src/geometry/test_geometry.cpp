@@ -24,6 +24,7 @@
 
 #include <geometry_msgs/msg/point32.hpp>
 
+#include <boost/version.hpp>
 #include <boost/geometry/algorithms/correct.hpp>
 #include <boost/geometry/algorithms/difference.hpp>
 #include <boost/geometry/algorithms/distance.hpp>
@@ -2700,10 +2701,17 @@ TEST(geometry, UnionDifferenceIntersectPolygon)
     std::vector<autoware::universe_utils::Polygon2d> boost_difference_result(
       boost_difference_resultMP.begin(), boost_difference_resultMP.end());
 
+#if BOOST_VERSION >= 108300  // Boost 1.83+ fixed precision issues in polygon boolean operations
+    EXPECT_TRUE(polygon_equal_vector(custom_union_poly, boost_union_result, epsilon));
+    EXPECT_TRUE(
+      polygon_equal_vector(custom_intersection_poly, boost_intersection_result, epsilon));
+    EXPECT_TRUE(polygon_equal_vector(custom_difference_poly, boost_difference_result, epsilon));
+#else
     EXPECT_FALSE(polygon_equal_vector(custom_union_poly, boost_union_result, epsilon));
     EXPECT_FALSE(
       polygon_equal_vector(custom_intersection_poly, boost_intersection_result, epsilon));
     EXPECT_FALSE(polygon_equal_vector(custom_difference_poly, boost_difference_result, epsilon));
+#endif
   }
 
   {  // case where Boost.Geometry omits a very small polygon in the difference result, while Shapely
