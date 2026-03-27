@@ -17,6 +17,7 @@ from autoware_smart_mpc_trajectory_follower import proxima_calc
 from autoware_smart_mpc_trajectory_follower.scripts import drive_functions
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 dim_steer_layer_1_head = 32
@@ -329,6 +330,492 @@ class DriveNeuralNetworkWithMemory(nn.Module):
         pre_pred = self.linear_relu_stack_2(pre_pred)
         pred = self.finalize(torch.cat((pre_pred, acc_layer_2, steer_layer_2), dim=2))
         return pred
+
+
+class TCNBlock(nn.Module):
+    """Single dilated causal 1D convolution block with residual connection.
+
+    Implements causal convolution by applying left-only padding so the output at
+    each timestep depends only on current and past inputs.  A residual (skip)
+    connection is added; when input and output channel counts differ a 1x1
+    convolution aligns dimensions.
+    """
+
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        dilation: int,
+        dropout: float = 0.0,
+        randomize: float = 0.01,
+    ):
+        super().__init__()
+        # Amount of left-padding needed to keep sequence length unchanged (causal).
+        self.causal_padding = (kernel_size - 1) * dilation
+        self.conv = nn.utils.weight_norm(
+            nn.Conv1d(in_channels, out_channels, kernel_size, dilation=dilation, padding=0)
+        )
+        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(dropout)
+        # 1x1 residual projection when channel dims differ.
+        self.residual_conv = (
+            nn.Conv1d(in_channels, out_channels, 1) if in_channels != out_channels else None
+        )
+        nn.init.uniform_(self.conv.weight, a=-randomize, b=randomize)
+        nn.init.uniform_(self.conv.bias, a=-randomize, b=randomize)
+        if self.residual_conv is not None:
+            nn.init.uniform_(self.residual_conv.weight, a=-randomize, b=randomize)
+            nn.init.uniform_(self.residual_conv.bias, a=-randomize, b=randomize)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch, in_channels, seq_len)
+        padded = F.pad(x, (self.causal_padding, 0))
+        out = self.dropout(self.relu(self.conv(padded)))
+        residual = self.residual_conv(x) if self.residual_conv is not None else x
+        return out + residual
+
+
+class TCN(nn.Module):
+    """Temporal Convolutional Network: stack of dilated causal convolution blocks.
+
+    Each block doubles the dilation, so the receptive field grows exponentially
+    with depth.  The receptive field of n_blocks blocks is::
+
+        RF = sum_{i=0}^{n_blocks-1} (kernel_size - 1) * 2^i + 1
+
+    For kernel_size=3, n_blocks=4: RF = 2*(1+2+4+8)+1 = 31 time steps.
+
+    Input/output format mirrors ``nn.LSTM(batch_first=True)``:
+    ``(batch, seq_len, features)`` → ``(batch, seq_len, hidden_size)``.
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int,
+        kernel_size: int = 3,
+        n_blocks: int = 4,
+        dropout: float = 0.0,
+        randomize: float = 0.01,
+    ):
+        super().__init__()
+        self.receptive_field = sum(
+            (kernel_size - 1) * (2**i) for i in range(n_blocks)
+        ) + 1
+        blocks = []
+        for i in range(n_blocks):
+            dilation = 2**i
+            in_ch = input_size if i == 0 else hidden_size
+            blocks.append(
+                TCNBlock(in_ch, hidden_size, kernel_size, dilation, dropout, randomize)
+            )
+        self.network = nn.Sequential(*blocks)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch, seq_len, input_size) — same convention as LSTM batch_first=True
+        # Conv1d expects (batch, channels, seq_len)
+        out = self.network(x.transpose(1, 2))
+        return out.transpose(1, 2)  # (batch, seq_len, hidden_size)
+
+
+class DriveNeuralNetworkWithTCN(nn.Module):
+    """Neural net with TCN memory, a drop-in training replacement for DriveNeuralNetworkWithMemory.
+
+    Replaces the single-layer LSTM with a Temporal Convolutional Network built from
+    dilated causal convolutions.  All pre-processing layers (acc/steer feature
+    extraction) and post-processing layers (linear_relu_stack, finalize) are
+    identical to ``DriveNeuralNetworkWithMemory``.
+
+    Input shape:  ``(batch, seq_len, raw_features)``
+    Output shape: ``(batch, seq_len, 6)``
+    """
+
+    def __init__(
+        self,
+        hidden_layer_sizes: tuple = (32, 16),
+        hidden_size_tcn: int = 64,
+        kernel_size_tcn: int = 3,
+        n_blocks_tcn: int = 4,
+        randomize: float = 0.01,
+        acc_drop_out: float = 0.0,
+        steer_drop_out: float = 0.0,
+        acc_delay_step=drive_functions.acc_delay_step,
+        steer_delay_step=drive_functions.steer_delay_step,
+        acc_time_constant_ctrl=drive_functions.acc_time_constant,
+        steer_time_constant_ctrl=drive_functions.steer_time_constant,
+        acc_queue_size=drive_functions.acc_ctrl_queue_size,
+        steer_queue_size=drive_functions.steer_ctrl_queue_size,
+        steer_queue_size_core=drive_functions.steer_ctrl_queue_size_core,
+    ):
+        super().__init__()
+        self.acc_time_constant_ctrl = acc_time_constant_ctrl
+        self.acc_delay_step = acc_delay_step
+        self.steer_time_constant_ctrl = steer_time_constant_ctrl
+        self.steer_delay_step = steer_delay_step
+
+        lb = -randomize
+        ub = randomize
+        self.acc_input_index = np.concatenate(([1], np.arange(acc_queue_size) + 3))
+        self.steer_input_index = np.concatenate(
+            ([2], np.arange(steer_queue_size_core) + acc_queue_size + 3)
+        )
+        self.steer_input_index_full = np.arange(steer_queue_size) + acc_queue_size + 3
+
+        # --- Feature extraction layers (identical to WithMemory) ---
+        self.acc_layer_1 = nn.Sequential(
+            nn.Linear(self.acc_input_index.shape[0], dim_acc_layer_1),
+            nn.ReLU(),
+        )
+        nn.init.uniform_(self.acc_layer_1[0].weight, a=lb, b=ub)
+        nn.init.uniform_(self.acc_layer_1[0].bias, a=lb, b=ub)
+
+        self.steer_layer_1_head = nn.Sequential(
+            nn.Linear(self.steer_input_index.shape[0], dim_steer_layer_1_head),
+            nn.ReLU(),
+        )
+        nn.init.uniform_(self.steer_layer_1_head[0].weight, a=lb, b=ub)
+        nn.init.uniform_(self.steer_layer_1_head[0].bias, a=lb, b=ub)
+
+        self.steer_layer_1_tail = nn.Sequential(
+            nn.Linear(self.steer_input_index_full.shape[0], dim_steer_layer_1_tail), nn.ReLU()
+        )
+        nn.init.uniform_(self.steer_layer_1_tail[0].weight, a=lb, b=ub)
+        nn.init.uniform_(self.steer_layer_1_tail[0].bias, a=lb, b=ub)
+
+        self.acc_layer_2 = nn.Sequential(nn.Linear(dim_acc_layer_1, dim_acc_layer_2), nn.ReLU())
+        nn.init.uniform_(self.acc_layer_2[0].weight, a=lb, b=ub)
+        nn.init.uniform_(self.acc_layer_2[0].bias, a=lb, b=ub)
+
+        self.steer_layer_2 = nn.Sequential(
+            nn.Linear(dim_steer_layer_1_head + dim_steer_layer_1_tail, dim_steer_layer_2),
+            nn.ReLU(),
+        )
+        nn.init.uniform_(self.steer_layer_2[0].weight, a=lb, b=ub)
+        nn.init.uniform_(self.steer_layer_2[0].bias, a=lb, b=ub)
+
+        # --- TCN replaces LSTM ---
+        tcn_input_size = 1 + dim_acc_layer_2 + dim_steer_layer_2  # same as LSTM input size
+        self.tcn = TCN(
+            input_size=tcn_input_size,
+            hidden_size=hidden_size_tcn,
+            kernel_size=kernel_size_tcn,
+            n_blocks=n_blocks_tcn,
+            randomize=randomize,
+        )
+
+        # --- Post-TCN fusion layers (mirror WithMemory) ---
+        self.linear_relu_stack_1 = nn.Sequential(
+            nn.Linear(tcn_input_size, hidden_layer_sizes[0]),
+            nn.ReLU(),
+        )
+        nn.init.uniform_(self.linear_relu_stack_1[0].weight, a=lb, b=ub)
+        nn.init.uniform_(self.linear_relu_stack_1[0].bias, a=lb, b=ub)
+
+        self.linear_relu_stack_2 = nn.Sequential(
+            nn.Linear(hidden_size_tcn + hidden_layer_sizes[0], hidden_layer_sizes[1]),
+            nn.ReLU(),
+        )
+        nn.init.uniform_(self.linear_relu_stack_2[0].weight, a=lb, b=ub)
+        nn.init.uniform_(self.linear_relu_stack_2[0].bias, a=lb, b=ub)
+
+        self.finalize = nn.Linear(
+            hidden_layer_sizes[1] + dim_acc_layer_2 + dim_steer_layer_2, 6
+        )
+        nn.init.uniform_(self.finalize.weight, a=lb, b=ub)
+        nn.init.uniform_(self.finalize.bias, a=lb, b=ub)
+
+        self.acc_dropout = nn.Dropout(acc_drop_out)
+        self.steer_dropout = nn.Dropout(steer_drop_out)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch, seq_len, raw_features)
+        acc_layer_1 = self.acc_layer_1(
+            drive_functions.acc_normalize * x[:, :, self.acc_input_index]
+        )
+        steer_layer_1 = torch.cat(
+            (
+                self.steer_layer_1_head(
+                    drive_functions.steer_normalize * x[:, :, self.steer_input_index]
+                ),
+                self.steer_layer_1_tail(
+                    drive_functions.steer_normalize * x[:, :, self.steer_input_index_full]
+                ),
+            ),
+            dim=2,
+        )
+        acc_layer_2 = self.acc_layer_2(self.acc_dropout(acc_layer_1))
+        steer_layer_2 = self.steer_layer_2(self.steer_dropout(steer_layer_1))
+        h_1 = torch.cat(
+            (drive_functions.vel_normalize * x[:, :, [0]], acc_layer_2, steer_layer_2), dim=2
+        )
+        # TCN processes the full sequence causally; shape: (batch, seq_len, hidden_size_tcn)
+        tcn_out = self.tcn(h_1)
+        pre_pred = torch.cat((tcn_out, self.linear_relu_stack_1(h_1)), dim=2)
+        pre_pred = self.linear_relu_stack_2(pre_pred)
+        pred = self.finalize(torch.cat((pre_pred, acc_layer_2, steer_layer_2), dim=2))
+        return pred
+
+
+class transform_model_with_tcn_to_pred:
+    """Python inference wrapper for DriveNeuralNetworkWithTCN.
+
+    Provides the same ``pred`` / ``pred_only_state`` / ``Pred`` interface
+    expected by ``drive_controller``, matching the C++ ``transform_model_with_memory_to_eigen``
+    interface.  Key points:
+
+    - The TCN was trained on *vars* vectors ``[vel, acc, steer, acc_queue, steer_queue]``
+      (not the full MPC state), so ``_make_vars`` extracts vars from the state before
+      appending to the context buffer.
+    - ``pred`` returns an 8-element vector (rotated prediction + theta Jacobian), matching
+      C++ ``rot_and_d_rot_error_prediction``.
+    - ``pred_only_state`` returns 6 elements (rotated prediction only), matching
+      C++ ``rotated_error_prediction``.
+    - ``pred_with_poly_diff`` takes a single state argument and returns a (6, x_dim+2)
+      matrix, matching C++ ``rot_and_d_rot_error_prediction_with_poly_diff``.
+    - ``Pred`` takes (x_dim, n_candidates) and returns (6, n_candidates), matching
+      C++ ``Rotated_error_prediction``.
+    """
+
+    def __init__(
+        self,
+        model: "DriveNeuralNetworkWithTCN",
+        A_for_linear_reg: np.ndarray,
+        b_for_linear_reg: np.ndarray,
+        deg: int,
+        acc_delay_step: int = drive_functions.acc_delay_step,
+        steer_delay_step: int = drive_functions.steer_delay_step,
+        acc_queue_size: int = drive_functions.acc_ctrl_queue_size,
+        steer_queue_size: int = drive_functions.steer_ctrl_queue_size,
+        steer_queue_size_core: int = drive_functions.steer_ctrl_queue_size_core,
+        vel_normalize: float = drive_functions.vel_normalize,
+        acc_normalize: float = drive_functions.acc_normalize,
+        steer_normalize: float = drive_functions.steer_normalize,
+    ):
+        from sklearn.preprocessing import PolynomialFeatures
+
+        self.model = model
+        self.A = A_for_linear_reg
+        self.b = b_for_linear_reg
+        self.deg = deg
+        self.acc_delay_step = acc_delay_step
+        self.steer_delay_step = steer_delay_step
+        self.acc_queue_size = acc_queue_size
+        self.steer_queue_size = steer_queue_size
+        self.steer_queue_size_core = steer_queue_size_core
+        self.vel_normalize = vel_normalize
+        self.acc_normalize = acc_normalize
+        self.steer_normalize = steer_normalize
+        self.polynomial_features = PolynomialFeatures(degree=deg, include_bias=False)
+        # Sliding window of vars vectors; maximum length = TCN receptive field.
+        self._context: list = []
+        self._max_context: int = model.tcn.receptive_field
+        # Cached NN output from the last _run_tcn() call; used by pred_with_poly_diff
+        # to avoid re-appending the same x_current to the context.
+        self._last_nn_out: np.ndarray = None
+        # Snapshot of the context at the start of the current MPC step, used to
+        # restore a consistent starting context before each iLQR/MPPI iteration.
+        self._base_context: list = []
+
+    def reset_context(self) -> None:
+        """Clear the context buffer (call when the episode restarts)."""
+        self._context = []
+        self._base_context = []
+        self._last_nn_out = None
+
+    def save_base_context(self) -> None:
+        """Snapshot the current context as the base for the upcoming optimization.
+
+        Call once at the start of each MPC control step, before the iLQR/MPPI loops.
+        The snapshot is then restored before each optimization iteration via
+        ``restore_base_context()`` so that all iterations see the same initial context
+        (analogous to ``set_lstm(h, c)`` for the LSTM model).
+        """
+        self._base_context = list(self._context)
+
+    def restore_base_context(self) -> None:
+        """Restore the context to the snapshot saved by ``save_base_context()``.
+
+        Call at the start of each iLQR/MPPI iteration to reset the context to the
+        real history before running the hypothetical horizon rollout.
+        """
+        self._context = list(self._base_context)
+        self._last_nn_out = None
+
+    def _make_vars(self, x_current: np.ndarray) -> np.ndarray:
+        """Extract NN input (vars) from full MPC state vector.
+
+        The TCN is trained on ``vars = [vel, acc, steer, acc_queue, steer_queue]``,
+        not on the full state ``x = [x_err, y_err, vel, theta, acc, steer, queues]``.
+        This extracts the relevant elements: x[2], x[4], x[5], x[6:].
+        """
+        return np.concatenate([x_current[[2, 4, 5]], x_current[6:]])
+
+    def _poly_correction(self, x_current: np.ndarray) -> np.ndarray:
+        """Polynomial regression correction (6,) for a full MPC state vector."""
+        from autoware_smart_mpc_trajectory_follower.training_and_data_check import (
+            train_drive_NN_model_with_memory,
+        )
+
+        ctrl_idx = train_drive_NN_model_with_memory.ctrl_index_for_polynomial_reg
+        v = self._make_vars(x_current)
+        feats = self.polynomial_features.fit_transform(v[ctrl_idx][np.newaxis])
+        return (feats @ self.A.T + self.b)[0]
+
+    def _run_tcn(self, x_current: np.ndarray) -> np.ndarray:
+        """Add vars(x_current) to the context, run TCN, return last-step NN output (6,)."""
+        v = self._make_vars(x_current)
+        self._context.append(v)
+        if len(self._context) > self._max_context:
+            self._context = self._context[-self._max_context :]
+        ctx = np.array(self._context, dtype=np.float32)  # (T, vars_dim)
+        with torch.no_grad():
+            x_tensor = torch.from_numpy(ctx[np.newaxis])  # (1, T, vars_dim)
+            output = self.model(x_tensor)  # (1, T, 6)
+        result = output[0, -1].numpy()  # last timestep: (6,)
+        self._last_nn_out = result
+        return result
+
+    def _rot_matrices(self, x_current: np.ndarray):
+        """Return (coef, Rot, dRot) from velocity and heading in x_current."""
+        theta = x_current[3]
+        vel = x_current[2]
+        coef = min(1.0, (2.0 * abs(vel)) ** 7)
+        c, s = np.cos(theta), np.sin(theta)
+        Rot = np.array([[c, -s], [s, c]])
+        dRot = np.array([[-s, -c], [c, -s]])
+        return coef, Rot, dRot
+
+    def pred(self, x_current: np.ndarray) -> np.ndarray:
+        """8-element prediction with rotation, matching C++ rot_and_d_rot_error_prediction.
+
+        Returns ``[coef * Rot @ raw[:2], coef * raw[2:6], coef * dRot @ raw[:2]]``.
+        """
+        raw = self._run_tcn(x_current) + self._poly_correction(x_current)
+        coef, Rot, dRot = self._rot_matrices(x_current)
+        result = np.empty(8)
+        result[:2] = coef * (Rot @ raw[:2])
+        result[2:6] = coef * raw[2:6]
+        result[6:8] = coef * (dRot @ raw[:2])
+        return result
+
+    def pred_only_state(self, x_current: np.ndarray) -> np.ndarray:
+        """6-element rotated prediction, matching C++ rotated_error_prediction."""
+        raw = self._run_tcn(x_current) + self._poly_correction(x_current)
+        coef, Rot, _ = self._rot_matrices(x_current)
+        result = np.empty(6)
+        result[:2] = coef * (Rot @ raw[:2])
+        result[2:] = coef * raw[2:]
+        return result
+
+    def pred_with_poly_diff(self, x_current: np.ndarray) -> np.ndarray:
+        """(6, x_dim+2) Jacobian matrix, matching C++ rot_and_d_rot_error_prediction_with_poly_diff.
+
+        Column 0  : rotated prediction (6,).
+        Column 1  : theta Jacobian, rows 0-1 only (dRot @ pred[:2]).
+        Columns 2+: polynomial regression Jacobian (sparse), same index mapping as C++.
+        """
+        x_dim = x_current.shape[0]
+        coef, Rot, dRot = self._rot_matrices(x_current)
+
+        # Always run TCN to advance the context correctly for this horizon step.
+        nn_out = self._run_tcn(x_current)
+        pred_raw = nn_out + self._poly_correction(x_current)  # (6,) unrotated
+
+        # Build x_for_poly from full state, replicating the C++ index mapping.
+        acc_start = 3 + max(self.acc_delay_step - 3, 0)
+        steer_start = 3 + self.acc_queue_size + max(self.steer_delay_step - 3, 0)
+        x_for_poly = np.concatenate([
+            x_current[0:3],
+            x_current[acc_start:acc_start + 3],
+            x_current[steer_start:steer_start + 3],
+        ])  # (9,)
+
+        # Polynomial Jacobian via finite differences (9-column).
+        eps = 1e-5
+        feats0 = self.polynomial_features.fit_transform(x_for_poly[np.newaxis])
+        poly_jac = np.zeros((6, 9))
+        for k in range(9):
+            xp = x_for_poly.copy()
+            xp[k] += eps
+            feats_k = self.polynomial_features.transform(xp[np.newaxis])
+            poly_jac[:, k] = ((feats_k - feats0) @ self.A.T)[0] / eps
+
+        # Scatter poly Jacobian into d_pred (6, x_dim-3) using C++ column mapping.
+        d_pred = np.zeros((6, x_dim - 3))
+        d_pred[:, 0:3] += poly_jac[:, 0:3]
+        d_pred[:, 1 + acc_start:1 + acc_start + 3] += poly_jac[:, 3:6]
+        d_pred[:, 1 + steer_start:1 + steer_start + 3] += poly_jac[:, 6:9]
+
+        # Apply rotation to d_pred.
+        rot_d_pred = np.zeros_like(d_pred)
+        rot_d_pred[:2, :] = Rot @ d_pred[:2, :]
+        rot_d_pred[2:, :] = d_pred[2:, :]
+
+        # Build (6, x_dim+2) output matrix.
+        result = np.zeros((6, x_dim + 2))
+        result[:2, 0] = Rot @ pred_raw[:2]
+        result[2:, 0] = pred_raw[2:]
+        result[:2, 1] = dRot @ pred_raw[:2]
+        result[:, 2 + 2] = rot_d_pred[:, 0]   # d/d(x[2]) column
+        result[:, 2 + 4] = rot_d_pred[:, 1]   # d/d(x[4]) column
+        result[:, 2 + 5] = rot_d_pred[:, 2]   # d/d(x[5]) column
+        result[:, 2 + 6:] = rot_d_pred[:, 3:]  # d/d(x[6:]) columns
+
+        return coef * result
+
+    def Pred(self, X: np.ndarray) -> np.ndarray:
+        """Batch prediction for MPPI candidate trajectories.
+
+        Args:
+            X: shape ``(x_dim, n_candidates)`` — each column is a full MPC state vector,
+               matching the C++ ``Rotated_error_prediction(X)`` interface.
+
+        Returns:
+            Rotated predictions of shape ``(6, n_candidates)``.
+        """
+        from autoware_smart_mpc_trajectory_follower.training_and_data_check import (
+            train_drive_NN_model_with_memory,
+        )
+
+        x_dim, n = X.shape
+        # Extract vars for each candidate: rows [2,4,5] and rows [6:].
+        V = np.vstack([X[[2, 4, 5], :], X[6:, :]])  # (vars_dim, n)
+        vars_dim = V.shape[0]
+
+        # Build batch TCN input: each candidate appends its vars to the shared context.
+        ctx = (
+            np.array(self._context, dtype=np.float32)
+            if self._context
+            else np.zeros((1, vars_dim), dtype=np.float32)
+        )
+        ctx_expanded = np.tile(ctx[np.newaxis], (n, 1, 1))  # (n, T, vars_dim)
+        cands = V.T[:, np.newaxis, :].astype(np.float32)  # (n, 1, vars_dim)
+        batch_input = np.concatenate([ctx_expanded, cands], axis=1)  # (n, T+1, vars_dim)
+
+        with torch.no_grad():
+            x_tensor = torch.from_numpy(batch_input)
+            output = self.model(x_tensor)  # (n, T+1, 6)
+        nn_out = output[:, -1].numpy()  # (n, 6)
+
+        # Polynomial correction for each candidate.
+        ctrl_idx = train_drive_NN_model_with_memory.ctrl_index_for_polynomial_reg
+        feats = self.polynomial_features.fit_transform(V[ctrl_idx, :].T)  # (n, n_feats)
+        poly_out = feats @ self.A.T + self.b  # (n, 6)
+        raw = nn_out + poly_out  # (n, 6) unrotated
+
+        # Apply rotation per candidate.
+        result = np.zeros((6, n))
+        for k in range(n):
+            theta = X[3, k]
+            vel = X[2, k]
+            c_k = min(1.0, (2.0 * abs(vel)) ** 7)
+            c, s = np.cos(theta), np.sin(theta)
+            Rot_k = np.array([[c, -s], [s, c]])
+            result[:2, k] = c_k * (Rot_k @ raw[k, :2])
+            result[2:, k] = c_k * raw[k, 2:]
+
+        return result
 
 
 class EarlyStopping:
