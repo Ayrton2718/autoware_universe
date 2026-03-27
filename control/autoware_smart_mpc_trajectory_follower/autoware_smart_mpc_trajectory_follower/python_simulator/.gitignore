@@ -12,3 +12,4 @@ test_*/
 python_sim_log_*/
 sim_setting.json
 auto_test_result_*.csv
+comparison_results/
