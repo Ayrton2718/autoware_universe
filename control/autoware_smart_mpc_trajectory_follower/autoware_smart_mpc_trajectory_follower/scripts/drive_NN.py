@@ -605,10 +605,14 @@ class transform_model_with_tcn_to_pred:
         # Sliding window of raw input vectors; maximum length = TCN receptive field.
         self._context: list = []
         self._max_context: int = model.tcn.receptive_field
+        # Cached NN output from the last _run_tcn() call; used by pred_with_poly_diff
+        # to avoid re-appending the same x_current to the context.
+        self._last_nn_out: np.ndarray = None
 
     def reset_context(self) -> None:
         """Clear the context buffer (call when the episode restarts)."""
         self._context = []
+        self._last_nn_out = None
 
     def _poly_correction(self, x_current: np.ndarray) -> np.ndarray:
         """Polynomial regression correction term for a single input vector."""
@@ -629,7 +633,9 @@ class transform_model_with_tcn_to_pred:
         with torch.no_grad():
             x_tensor = torch.from_numpy(ctx[np.newaxis])  # (1, T, features)
             output = self.model(x_tensor)  # (1, T, 6)
-        return output[0, -1].numpy()  # last timestep: (6,)
+        result = output[0, -1].numpy()  # last timestep: (6,)
+        self._last_nn_out = result
+        return result
 
     def pred(self, x_current: np.ndarray) -> np.ndarray:
         """Point prediction: NN output + polynomial correction."""
@@ -641,8 +647,13 @@ class transform_model_with_tcn_to_pred:
 
     def pred_with_poly_diff(self, x_current: np.ndarray, dx_current: np.ndarray) -> np.ndarray:
         """Prediction with gradient via polynomial Jacobian only (TCN gradient not implemented)."""
-        # Reuse last context run without re-appending.
-        nn_out = self._run_tcn(x_current)
+        # Reuse the NN output cached by the preceding pred() call to avoid appending
+        # x_current to the context a second time.  Falls back to _run_tcn() only when
+        # this method is called standalone (no prior pred() for this time step).
+        if self._last_nn_out is not None:
+            nn_out = self._last_nn_out
+        else:
+            nn_out = self._run_tcn(x_current)
         from autoware_smart_mpc_trajectory_follower.training_and_data_check import (
             train_drive_NN_model_with_memory,
         )
