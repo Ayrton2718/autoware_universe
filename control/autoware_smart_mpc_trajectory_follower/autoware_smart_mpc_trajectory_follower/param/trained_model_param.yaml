@@ -3,7 +3,15 @@ trained_model_parameter:
     use_trained_model: false
     update_trained_model: false
     max_train_data_size: 10000
-    error_decay: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5]
+    error_decay:
+    - 0.5
+    - 0.5
+    - 0.5
+    - 0.5
+    - 0.5
+    - 0.5
+    - 0.5
+    - 0.5
     use_trained_model_diff: true
     minimum_steer_diff: 0.03
     reflect_only_poly_diff: false
@@ -21,6 +29,7 @@ trained_model_parameter:
     use_steer_noise: false
   memory_for_training:
     use_memory_for_training: true
+    use_tcn_for_training: true
     use_memory_diff: true
     use_sg_for_memory_diff: true
     sg_deg_for_memory_diff: 0
@@ -55,7 +64,7 @@ trained_model_parameter:
     NN_steer_weight_diff: 0.1
     NN_x_weight_two_diff: 0.0001
     NN_y_weight_two_diff: 0.001
-    NN_v_weight_two_diff: 0.00001
+    NN_v_weight_two_diff: 1.0e-05
     NN_yaw_weight_two_diff: 0.01
     NN_acc_weight_two_diff: 0.01
     NN_steer_weight_two_diff: 0.01
