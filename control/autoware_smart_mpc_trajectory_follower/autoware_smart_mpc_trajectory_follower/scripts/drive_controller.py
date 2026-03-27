@@ -244,6 +244,8 @@ class drive_controller:
         self.err = 0
         if self.use_trained_model and drive_functions.use_memory_for_training:
             print("use_memory_diff", self.use_memory_diff)
+        if self.use_trained_model and drive_functions.use_tcn_for_training:
+            print("TCN memory model: using Python inference (no C++ bridge)")
         if self.use_trained_model:
             self.model = torch.load(model_file_name)
             polynomial_reg_info = np.load(self.load_polynomial_reg_dir + "/polynomial_reg_info.npz")
@@ -251,7 +253,20 @@ class drive_controller:
             self.b_for_polynomial_reg = polynomial_reg_info["b"]
             self.deg = int(polynomial_reg_info["deg"])
             self.polynomial_features = PolynomialFeatures(degree=self.deg, include_bias=False)
-            if drive_functions.use_memory_for_training:
+            if drive_functions.use_memory_for_training and drive_functions.use_tcn_for_training:
+                # TCN path: Python inference wrapper with sliding context buffer.
+                self.transform_model = drive_NN.transform_model_with_tcn_to_pred(
+                    self.model,
+                    self.A_for_polynomial_reg,
+                    self.b_for_polynomial_reg,
+                    self.deg,
+                    self.acc_delay_step,
+                    self.steer_delay_step,
+                    drive_functions.acc_ctrl_queue_size,
+                    drive_functions.steer_ctrl_queue_size,
+                    drive_functions.steer_ctrl_queue_size_core,
+                )
+            elif drive_functions.use_memory_for_training:
                 self.transform_model = drive_NN.transform_model_with_memory_to_c(
                     self.model,
                     self.A_for_polynomial_reg,
@@ -284,7 +299,8 @@ class drive_controller:
                     drive_functions.steer_ctrl_queue_size_core,
                 )
             self.pred = self.transform_model.pred
-            if drive_functions.reflect_only_poly_diff:
+            if drive_functions.reflect_only_poly_diff or drive_functions.use_tcn_for_training:
+                # TCN does not expose an analytic Jacobian; fall back to polynomial diff.
                 self.pred_with_diff = self.transform_model.pred_with_poly_diff
             elif self.use_memory_diff and drive_functions.use_memory_for_training:
                 self.pred_with_diff = self.transform_model.pred_with_memory_diff
@@ -468,8 +484,11 @@ class drive_controller:
             self.time_stamp_for_update_lstm.clear()
             self.X_queue_for_update_lstm.clear()
             if self.use_trained_model and drive_functions.use_memory_for_training:
-                self.h = np.zeros(self.model.lstm.weight_hh_l0.shape[1])
-                self.c = (self.h).copy()
+                if drive_functions.use_tcn_for_training:
+                    self.transform_model.reset_context()
+                else:
+                    self.h = np.zeros(self.model.lstm.weight_hh_l0.shape[1])
+                    self.c = (self.h).copy()
 
             self.initialize_X_smoothing_time_stamp = True
             self.acc_fb_1 = 0.0
@@ -499,7 +518,11 @@ class drive_controller:
         self.u_old = np.array([self.acc_input_queue[-1], self.steer_input_queue[-1]])
         if self.use_trained_model and drive_functions.use_memory_for_training:
             if len(time_stamp) > 0:
-                self.update_lstm_info(time_stamp[-1])
+                if drive_functions.use_tcn_for_training:
+                    # TCN: context is managed inside the pred wrapper; nothing extra needed here.
+                    pass
+                else:
+                    self.update_lstm_info(time_stamp[-1])
 
         self.X_current_queue.append(self.X_current.copy())
         if len(self.X_current_queue) > drive_functions.mpc_freq:
@@ -512,7 +535,11 @@ class drive_controller:
             for k in range(drive_functions.max_iter_mppi):
                 if not proceed:
                     break
-                if drive_functions.use_memory_for_training and self.use_trained_model:
+                if (
+                    drive_functions.use_memory_for_training
+                    and self.use_trained_model
+                    and not drive_functions.use_tcn_for_training
+                ):
                     self.transform_model.transform.set_lstm(self.h, self.c)
                     self.transform_model.transform.set_lstm_for_candidate(
                         self.h, self.c, drive_functions.sample_num
@@ -535,7 +562,11 @@ class drive_controller:
             for k in range(drive_functions.max_iter_ilqr):
                 if not proceed:
                     break
-                if drive_functions.use_memory_for_training and self.use_trained_model:
+                if (
+                    drive_functions.use_memory_for_training
+                    and self.use_trained_model
+                    and not drive_functions.use_tcn_for_training
+                ):
                     self.transform_model.transform.set_lstm(self.h, self.c)
                     self.transform_model.transform.set_lstm_for_candidate(
                         self.h, self.c, drive_functions.max_iter_ls + 1
@@ -619,7 +650,7 @@ class drive_controller:
             self.u_opt_dot = (u_opt - self.u_old) / drive_functions.ctrl_time_step
 
         if self.use_trained_model:
-            if drive_functions.use_memory_for_training:
+            if drive_functions.use_memory_for_training and not drive_functions.use_tcn_for_training:
                 self.transform_model.transform.set_lstm(self.h, self.c)
             self.previous_error = drive_functions.error_decay * self.previous_error + (
                 1 - drive_functions.error_decay
@@ -1109,7 +1140,7 @@ class drive_controller:
                     drive_functions.steer_ctrl_queue_size_core,
                 )
                 self.pred = self.transform_model.pred
-                if drive_functions.reflect_only_poly_diff:
+                if drive_functions.reflect_only_poly_diff or drive_functions.use_tcn_for_training:
                     self.pred_with_diff = self.transform_model.pred_with_poly_diff
                 elif self.use_memory_diff and drive_functions.use_memory_for_training:
                     self.pred_with_diff = self.transform_model.pred_with_memory_diff
