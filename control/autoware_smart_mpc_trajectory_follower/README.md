@@ -118,6 +118,30 @@ model_trainer.get_trained_model(use_polynomial_reg=True,force_NN_model_to_zero=T
 
 Move `model_for_test_drive.pth` and `polynomial_reg_info.npz` saved in `save_dir` to the home directory and set `trained_model_parameter:control_application:use_trained_model` in [trained_model_param.yaml](./autoware_smart_mpc_trajectory_follower/param/trained_model_param.yaml) to `true` to reflect the trained model in the control.
 
+### Evaluating a trained model using a Python script
+
+The prediction quality of a saved model can be checked against driving data stored as CSV files using [evaluate_drive_NN_model.py](./autoware_smart_mpc_trajectory_follower/training_and_data_check/evaluate_drive_NN_model.py).
+
+After moving to `control/autoware_smart_mpc_trajectory_follower/autoware_smart_mpc_trajectory_follower/training_and_data_check`, run the following command:
+
+```bash
+python3 evaluate_drive_NN_model.py <data_dir> --model_dir <model_dir> --save_dir <save_dir>
+```
+
+Here `data_dir` is the directory containing the CSV driving data, `model_dir` is the directory containing `model_for_test_drive.pth` and `polynomial_reg_info.npz` (defaults to the home directory), and `save_dir` is the directory where evaluation plots are saved (defaults to the current directory).
+
+The same steps can also be reproduced directly in a Python environment:
+
+```python
+from autoware_smart_mpc_trajectory_follower.training_and_data_check import train_drive_NN_model
+model_evaluator = train_drive_NN_model.train_drive_NN_model()
+model_evaluator.add_data_from_csv(data_dir)
+model_evaluator.load_models(save_dir=model_dir)
+model_evaluator.plot_trained_result(save_dir=save_dir)
+```
+
+The evaluation generates `train_drive_NN_model_fig.png` in `save_dir`, which plots the nominal model error and the predicted error for each state component (x, y, velocity, yaw, acceleration, steer) over time.
+
 ### Performance evaluation
 
 Here, as an example, we describe the verification of the adaptive performance when the wheel base of the sample_vehicle is 2.79 m, but an incorrect value of 2.0 m is given to the controller side.

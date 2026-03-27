@@ -663,3 +663,24 @@ class train_drive_NN_model_with_memory(add_training_data_from_csv.add_data_from_
         """Run save_model and save_polynomial_reg_info."""
         self.save_model(save_dir, model_name)
         self.save_polynomial_reg_info(save_dir, polynomial_reg_info_name)
+
+    def load_model(self, save_dir=".", path="model_for_test_drive.pth") -> None:
+        """Load trained NN model from disk."""
+        self.model = torch.load(save_dir + "/" + path)
+
+    def load_polynomial_reg_info(self, save_dir=".", path="polynomial_reg_info.npz") -> None:
+        """Load the coefficients and degree of the polynomial regression from disk."""
+        data = np.load(save_dir + "/" + path)
+        self.A = data["A"]
+        self.b = data["b"]
+        self.deg = int(data["deg"])
+
+    def load_models(
+        self,
+        save_dir=".",
+        model_name="model_for_test_drive.pth",
+        polynomial_reg_info_name="polynomial_reg_info.npz",
+    ) -> None:
+        """Run load_model and load_polynomial_reg_info."""
+        self.load_model(save_dir, model_name)
+        self.load_polynomial_reg_info(save_dir, polynomial_reg_info_name)
