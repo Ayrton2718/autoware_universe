@@ -19,10 +19,15 @@ from autoware_smart_mpc_trajectory_follower.training_and_data_check import (
     train_drive_NN_model_with_memory,
 )
 from autoware_smart_mpc_trajectory_follower.training_and_data_check import (
+    train_drive_NN_model_with_tcn,
+)
+from autoware_smart_mpc_trajectory_follower.training_and_data_check import (
     train_drive_NN_model_without_memory,
 )
 
-if drive_functions.use_memory_for_training:
+if drive_functions.use_memory_for_training and drive_functions.use_tcn_for_training:
+    train_drive_NN_model = train_drive_NN_model_with_tcn.train_drive_NN_model_with_tcn
+elif drive_functions.use_memory_for_training:
     train_drive_NN_model = train_drive_NN_model_with_memory.train_drive_NN_model_with_memory
 else:
     train_drive_NN_model = train_drive_NN_model_without_memory.train_drive_NN_model_without_memory

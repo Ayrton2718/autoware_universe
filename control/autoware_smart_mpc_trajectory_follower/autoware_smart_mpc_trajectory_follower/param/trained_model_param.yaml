@@ -21,6 +21,7 @@ trained_model_parameter:
     use_steer_noise: false
   memory_for_training:
     use_memory_for_training: true
+    use_tcn_for_training: false
     use_memory_diff: true
     use_sg_for_memory_diff: true
     sg_deg_for_memory_diff: 0

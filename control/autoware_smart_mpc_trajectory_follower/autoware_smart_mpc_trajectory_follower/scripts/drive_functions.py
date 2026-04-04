@@ -229,6 +229,9 @@ sg_window_size_for_noise = int(
 use_memory_for_training = bool(
     trained_model_param["trained_model_parameter"]["memory_for_training"]["use_memory_for_training"]
 )
+use_tcn_for_training = bool(
+    trained_model_param["trained_model_parameter"]["memory_for_training"]["use_tcn_for_training"]
+)
 
 load_dir = os.environ["HOME"]
 save_dir = os.environ["HOME"]  # +"/autoware"
