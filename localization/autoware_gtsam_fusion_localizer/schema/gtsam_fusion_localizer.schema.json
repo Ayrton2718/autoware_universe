@@ -1,0 +1,157 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "GTSAM Fusion Localizer Parameters",
+  "type": "object",
+  "definitions": {
+    "gtsam_fusion_localizer": {
+      "type": "object",
+      "properties": {
+        "frames": {
+          "type": "object",
+          "properties": {
+            "map": {"type": "string", "default": "map"},
+            "base_link": {"type": "string", "default": "base_link"},
+            "imu_link": {"type": "string", "default": "imu_link"}
+          },
+          "required": ["map", "base_link", "imu_link"],
+          "additionalProperties": false
+        },
+        "imu": {
+          "type": "object",
+          "properties": {
+            "gravity": {"type": "number", "default": 9.80665},
+            "accel_noise_sigma": {"type": "number", "default": 0.05},
+            "gyro_noise_sigma": {"type": "number", "default": 0.005},
+            "accel_bias_rw_sigma": {"type": "number", "default": 1.0e-4},
+            "gyro_bias_rw_sigma": {"type": "number", "default": 1.0e-5},
+            "integration_cov": {"type": "number", "default": 1.0e-8},
+            "expected_rate_hz": {"type": "number", "default": 100.0},
+            "static_tf_lookup_timeout_sec": {"type": "number", "default": 5.0}
+          },
+          "additionalProperties": false
+        },
+        "keyframe": {
+          "type": "object",
+          "properties": {
+            "trigger": {"type": "string", "enum": ["ndt_or_gnss", "fixed_dt"], "default": "ndt_or_gnss"},
+            "min_dt_sec": {"type": "number", "default": 0.05},
+            "max_dt_sec": {"type": "number", "default": 1.0},
+            "ndt_position_gate_m": {"type": "number", "default": 5.0},
+            "gnss_position_gate_m": {"type": "number", "default": 5.0},
+            "gnss_fix_match_tolerance_sec": {"type": "number", "default": 0.05}
+          },
+          "additionalProperties": false
+        },
+        "init": {
+          "type": "object",
+          "properties": {
+            "source": {"type": "string", "enum": ["ndt", "gnss", "ndt_then_gnss"], "default": "ndt_then_gnss"},
+            "wait_timeout_sec": {"type": "number", "default": 30.0},
+            "initial_velocity_sigma": {"type": "number", "default": 0.5},
+            "initial_bias_accel_sigma": {"type": "number", "default": 0.1},
+            "initial_bias_gyro_sigma": {"type": "number", "default": 0.01}
+          },
+          "additionalProperties": false
+        },
+        "twist": {
+          "type": "object",
+          "properties": {
+            "enable": {"type": "boolean", "default": true},
+            "use_scale_variable": {"type": "boolean", "default": false},
+            "scale_prior_mean": {"type": "number", "default": 1.0},
+            "scale_prior_sigma": {"type": "number", "default": 0.05}
+          },
+          "additionalProperties": false
+        },
+        "gnss": {
+          "type": "object",
+          "properties": {
+            "max_position_sigma": {"type": "number", "default": 0.5},
+            "accept_fix_statuses": {
+              "type": "array",
+              "items": {"type": "integer"},
+              "default": [0, 1, 2]
+            },
+            "use_lever_arm_factor": {"type": "boolean", "default": false},
+            "lever_arm_xyz": {
+              "type": "array",
+              "items": {"type": "number"},
+              "minItems": 3,
+              "maxItems": 3,
+              "default": [1.2, 0.0, 1.5]
+            },
+            "lever_arm_prior_sigma": {"type": "number", "default": 0.05}
+          },
+          "additionalProperties": false
+        },
+        "robust": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": ["none", "huber", "cauchy", "switchable"],
+              "default": "none"
+            },
+            "huber_k": {"type": "number", "default": 1.345},
+            "mahalanobis_chi2_p": {"type": "number", "default": 0.99},
+            "max_consecutive_rejects": {"type": "integer", "default": 5}
+          },
+          "additionalProperties": false
+        },
+        "ndt": {
+          "type": "object",
+          "properties": {
+            "degeneracy_condition_threshold": {"type": "number", "default": 100.0},
+            "degeneracy_threshold": {"type": "number", "default": 0.5},
+            "degeneracy_inflation_factor": {"type": "number", "default": 100.0}
+          },
+          "additionalProperties": false
+        },
+        "isam2": {
+          "type": "object",
+          "properties": {
+            "relinearize_threshold": {"type": "number", "default": 0.01},
+            "relinearize_skip": {"type": "integer", "default": 1},
+            "cache_linearized_factors": {"type": "boolean", "default": true},
+            "factorization": {"type": "string", "enum": ["CHOLESKY", "QR"], "default": "CHOLESKY"},
+            "use_fixed_lag_smoother": {"type": "boolean", "default": false},
+            "smoother_lag_sec": {"type": "number", "default": 30.0}
+          },
+          "additionalProperties": false
+        },
+        "output": {
+          "type": "object",
+          "properties": {
+            "publish_tf": {"type": "boolean", "default": true},
+            "publish_rate_hz": {"type": "number", "default": 50.0}
+          },
+          "additionalProperties": false
+        },
+        "diagnostics": {
+          "type": "object",
+          "properties": {
+            "enable": {"type": "boolean", "default": true},
+            "rate_hz": {"type": "number", "default": 1.0},
+            "gnss_ndt_divergence_warn_m": {"type": "number", "default": 0.5},
+            "gnss_ndt_divergence_error_m": {"type": "number", "default": 2.0}
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": ["frames", "imu", "keyframe", "init", "twist", "gnss", "robust", "ndt", "isam2", "output", "diagnostics"],
+      "additionalProperties": false
+    }
+  },
+  "properties": {
+    "/**": {
+      "type": "object",
+      "properties": {
+        "ros__parameters": {"$ref": "#/definitions/gtsam_fusion_localizer"}
+      },
+      "required": ["ros__parameters"],
+      "additionalProperties": false
+    }
+  },
+  "required": ["/**"],
+  "additionalProperties": false
+}
