@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<launch>
+  <arg name="input_imu_topic" default="/sensing/imu/imu_data"/>
+  <arg name="input_twist_topic" default="/localization/twist_estimator/twist_with_covariance"/>
+  <arg name="input_ndt_pose_topic" default="/localization/pose_estimator/pose_with_covariance"/>
+  <arg name="input_gnss_pose_topic" default="/sensing/gnss/pose_with_covariance"/>
+  <arg name="input_gnss_fix_topic" default="/sensing/gnss/fix"/>
+  <arg name="param_file" default="$(find-pkg-share autoware_gtsam_fusion_localizer)/config/gtsam_fusion_localizer.param.yaml"/>
+
+  <node pkg="autoware_gtsam_fusion_localizer" exec="autoware_gtsam_fusion_localizer_node" name="gtsam_fusion_localizer" output="both">
+    <remap from="~/input/imu" to="$(var input_imu_topic)"/>
+    <remap from="~/input/twist" to="$(var input_twist_topic)"/>
+    <remap from="~/input/ndt_pose" to="$(var input_ndt_pose_topic)"/>
+    <remap from="~/input/gnss_pose" to="$(var input_gnss_pose_topic)"/>
+    <remap from="~/input/gnss_fix" to="$(var input_gnss_fix_topic)"/>
+    <remap from="~/output/pose" to="/localization/pose_twist_fusion_filter/pose"/>
+    <remap from="~/output/pose_with_covariance" to="/localization/pose_twist_fusion_filter/pose_with_covariance"/>
+    <remap from="~/output/biased_pose" to="/localization/pose_twist_fusion_filter/biased_pose"/>
+    <remap from="~/output/biased_pose_with_covariance" to="/localization/pose_twist_fusion_filter/biased_pose_with_covariance"/>
+    <remap from="~/output/twist" to="/localization/pose_twist_fusion_filter/twist"/>
+    <remap from="~/output/twist_with_covariance" to="/localization/pose_twist_fusion_filter/twist_with_covariance"/>
+    <remap from="~/output/kinematic_state" to="/localization/kinematic_state"/>
+    <param from="$(var param_file)"/>
+  </node>
+</launch>

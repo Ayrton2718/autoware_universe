@@ -1,0 +1,81 @@
+/**:
+  ros__parameters:
+    frames:
+      map: map
+      base_link: base_link
+      imu_link: imu_link
+
+    # Continuous-time IMU noise densities for the CombinedImuFactor preintegrator.
+    imu:
+      gravity: 9.80665
+      accel_noise_sigma: 0.05
+      gyro_noise_sigma: 0.005
+      accel_bias_rw_sigma: 1.0e-4
+      gyro_bias_rw_sigma: 1.0e-5
+      integration_cov: 1.0e-8
+      expected_rate_hz: 100.0
+      static_tf_lookup_timeout_sec: 5.0
+
+    # When to add a new keyframe (X, V, B variables) to the graph.
+    keyframe:
+      trigger: ndt_or_gnss
+      min_dt_sec: 0.05
+      max_dt_sec: 1.0
+      ndt_position_gate_m: 5.0
+      gnss_position_gate_m: 5.0
+      gnss_fix_match_tolerance_sec: 0.05
+
+    # State 0 initialization.
+    init:
+      source: ndt_then_gnss
+      wait_timeout_sec: 30.0
+      initial_velocity_sigma: 0.5
+      initial_bias_accel_sigma: 0.1
+      initial_bias_gyro_sigma: 0.01
+
+    # Linear-velocity factor on V(k) from the twist subscription.
+    twist:
+      enable: true
+      use_scale_variable: false
+      scale_prior_mean: 1.0
+      scale_prior_sigma: 0.05
+
+    # GNSS factor. NavSatFix.status values that we accept (0=FIX, 1=SBAS, 2=GBAS).
+    gnss:
+      max_position_sigma: 0.5
+      accept_fix_statuses: [0, 1, 2]
+      use_lever_arm_factor: false
+      lever_arm_xyz: [1.2, 0.0, 1.5]
+      lever_arm_prior_sigma: 0.05
+
+    # Phase B robustness layer.
+    robust:
+      mode: none  # one of: none, huber, cauchy, switchable
+      huber_k: 1.345
+      mahalanobis_chi2_p: 0.99
+      max_consecutive_rejects: 5
+
+    # Phase B NDT degenerate-axis covariance inflation.
+    ndt:
+      degeneracy_condition_threshold: 100.0
+      degeneracy_threshold: 0.5
+      degeneracy_inflation_factor: 100.0
+
+    # iSAM2 / fixed-lag smoother knobs.
+    isam2:
+      relinearize_threshold: 0.01
+      relinearize_skip: 1
+      cache_linearized_factors: true
+      factorization: CHOLESKY
+      use_fixed_lag_smoother: false
+      smoother_lag_sec: 30.0
+
+    output:
+      publish_tf: true
+      publish_rate_hz: 50.0
+
+    diagnostics:
+      enable: true
+      rate_hz: 1.0
+      gnss_ndt_divergence_warn_m: 0.5
+      gnss_ndt_divergence_error_m: 2.0
